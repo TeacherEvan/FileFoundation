@@ -5,7 +5,6 @@ Run: python -m unittest tests.test_filefoundation -v
 import hashlib
 import json
 import os
-import stat as stat_mod
 import tempfile
 import unittest
 from unittest import mock
@@ -65,7 +64,7 @@ class TestWalk(unittest.TestCase):
             f.write(b"x")
         os.chmod(ro, 0o000)
         try:
-            recs, warns = ff.walk(self.tmp)
+            _recs, warns = ff.walk(self.tmp)
             # either permission denied surfaces in warnings, or root strips it (some envs allow)
             # check that walk did NOT crash
             self.assertIsInstance(warns, list)
@@ -146,6 +145,53 @@ class TestCLI(unittest.TestCase):
             with mock.patch("sys.argv", ["ff", "--table", tmp]):
                 rc = ff.main()
             self.assertEqual(rc, ff.EXIT_OK)
+
+
+
+class TestHashBytesCap(unittest.TestCase):
+    """Verify the --hash-bytes cap is honored end-to-end (bug-fix wiring)."""
+
+    def test_analyze_file_caps_hash_at_n_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "big.bin")
+            payload = bytes(range(256)) * 4  # 1024 bytes, deterministic
+            with open(p, "wb") as f:
+                f.write(payload)
+            rec = ff.analyze_file(p, hash_bytes=16)
+            expected = hashlib.sha256(payload[:16]).hexdigest()
+            self.assertEqual(rec["sha256"], expected)
+            # file is bigger than the cap — hash must NOT match full-file sha
+            self.assertNotEqual(rec["sha256"], hashlib.sha256(payload).hexdigest())
+
+    def test_walk_propagates_hash_bytes_kwarg(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "big.bin")
+            payload = b"A" * 200 + b"B" * 200  # 400 bytes
+            with open(p, "wb") as f:
+                f.write(payload)
+            recs, _ = ff.walk(tmp, hash_bytes=32)
+            self.assertEqual(len(recs), 1)
+            self.assertEqual(recs[0]["sha256"], hashlib.sha256(payload[:32]).hexdigest())
+
+    def test_cli_hash_bytes_flag_affects_output(self):
+        import io
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "x.bin")
+            payload = b"hello world\n" * 100  # 1200 bytes
+            with open(p, "wb") as f:
+                f.write(payload)
+            # capture stdout
+            buf = io.StringIO()
+            with mock.patch("sys.argv", ["ff", "--hash-bytes", "10", tmp]), \
+                 mock.patch("sys.stdout", buf):
+                rc = ff.main()
+            self.assertEqual(rc, ff.EXIT_OK)
+            parsed = json.loads(buf.getvalue())
+            self.assertEqual(len(parsed["files"]), 1)
+            self.assertEqual(
+                parsed["files"][0]["sha256"],
+                hashlib.sha256(payload[:10]).hexdigest(),
+            )
 
 
 if __name__ == "__main__":

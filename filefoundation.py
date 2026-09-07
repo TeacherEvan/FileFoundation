@@ -16,8 +16,9 @@ import os
 import stat
 import sys
 from collections import Counter
+from collections.abc import Iterable
 from datetime import datetime, timezone
-from typing import Iterable
+from typing import Any
 
 __version__ = "0.1.0"
 
@@ -46,7 +47,7 @@ def _iso(ts: float) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
 
 
-def analyze_file(path: str, hash_bytes: int = HASH_CHUNK) -> dict:
+def analyze_file(path: str, hash_bytes: int = HASH_CHUNK) -> dict[str, Any]:
     """Return forensic record for one file. Streams hash for large files."""
     st = os.stat(path, follow_symlinks=False)
     sha = hashlib.sha256()
@@ -73,7 +74,12 @@ def analyze_file(path: str, hash_bytes: int = HASH_CHUNK) -> dict:
     }
 
 
-def walk(root: str, excludes: Iterable[str] = (), follow_symlinks: bool = False) -> tuple:
+def walk(
+    root: str,
+    excludes: Iterable[str] = (),
+    follow_symlinks: bool = False,
+    hash_bytes: int = HASH_CHUNK,
+) -> tuple[list[dict[str, Any]], list[str]]:
     records = []
     warnings = []
     excl = list(excludes)
@@ -89,7 +95,7 @@ def walk(root: str, excludes: Iterable[str] = (), follow_symlinks: bool = False)
             if is_excluded(full):
                 continue
             try:
-                records.append(analyze_file(full))
+                records.append(analyze_file(full, hash_bytes=hash_bytes))
             except PermissionError as e:
                 warnings.append(f"permission denied: {full} ({e})")
             except OSError as e:
@@ -97,7 +103,11 @@ def walk(root: str, excludes: Iterable[str] = (), follow_symlinks: bool = False)
     return records, warnings
 
 
-def aggregate(records, top_n: int = 5, high_entropy_threshold: float = DEFAULT_ENTROPY_THRESHOLD) -> dict:
+def aggregate(
+    records: list[dict[str, Any]],
+    top_n: int = 5,
+    high_entropy_threshold: float = DEFAULT_ENTROPY_THRESHOLD,
+) -> dict[str, Any]:
     total_bytes = sum(r["size"] for r in records)
     type_hist = Counter(r["mime"] for r in records)
     largest = sorted(records, key=lambda r: r["size"], reverse=True)[:top_n]
@@ -112,11 +122,19 @@ def aggregate(records, top_n: int = 5, high_entropy_threshold: float = DEFAULT_E
     }
 
 
-def emit_json(records, summary, warnings) -> str:
+def emit_json(
+    records: list[dict[str, Any]],
+    summary: dict[str, Any],
+    warnings: list[str],
+) -> str:
     return json.dumps({"summary": summary, "warnings": warnings, "files": records}, indent=2, sort_keys=False)
 
 
-def emit_table(records, summary, warnings) -> str:
+def emit_table(
+    records: list[dict[str, Any]],
+    summary: dict[str, Any],
+    warnings: list[str],
+) -> str:
     cols = ("size", "entropy", "mime", "sha256", "path")
     rows = [
         (
@@ -147,7 +165,7 @@ def emit_table(records, summary, warnings) -> str:
     return "\n".join(out)
 
 
-def parse_args(argv=None):
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="filefoundation",
                                 description="Walk a directory tree and report per-file forensic properties.")
     p.add_argument("path", nargs="?", default=".", help="root directory (default: cwd)")
@@ -162,7 +180,7 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
-def main(argv=None) -> int:
+def main(argv: list[str] | None = None) -> int:
     try:
         args = parse_args(argv)
     except SystemExit as e:
@@ -174,7 +192,7 @@ def main(argv=None) -> int:
         return EXIT_ARGS
 
     try:
-        records, warnings = walk(root, excludes=args.exclude)
+        records, warnings = walk(root, excludes=args.exclude, hash_bytes=args.hash_bytes)
         summary = aggregate(records, high_entropy_threshold=args.high_entropy_threshold)
     except OSError as e:
         print(f"io error: {e}", file=sys.stderr)
