@@ -196,3 +196,84 @@ class TestHashBytesCap(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestDefaultIgnore(unittest.TestCase):
+    """OBJ-003: default VCS-skip + --no-ignore-vcs override."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        # a fake .git/HEAD file
+        os.makedirs(os.path.join(self.tmp, ".git"))
+        with open(os.path.join(self.tmp, ".git", "HEAD"), "w") as f:
+            f.write("ref: refs/heads/main\n")
+        # and a real source file
+        with open(os.path.join(self.tmp, "real.txt"), "w") as f:
+            f.write("hello\n")
+
+    def test_default_skips_git_dir(self):
+        recs, _ = ff.walk(self.tmp)
+        paths = [r["path"] for r in recs]
+        # real.txt IS walked
+        self.assertTrue(any(p.endswith("real.txt") for p in paths))
+        # nothing under .git/ leaks out
+        self.assertFalse(any("/.git/" in p for p in paths),
+                         f".git/* leaked through default ignore: {paths}")
+
+    def test_no_ignore_vcs_includes_git_dir(self):
+        recs, _ = ff.walk(self.tmp, ignore_vcs_default=False)
+        paths = [r["path"] for r in recs]
+        # now .git/HEAD is in the records
+        self.assertTrue(any(p.endswith(".git/HEAD") or p.endswith("HEAD") and "/.git/" in p
+                            for p in paths),
+                        f".git/HEAD missing when ignore_vcs_default=False: {paths}")
+
+    def test_user_exclude_overrides_default(self):
+        # user explicitly excludes .git; default ignore_vcs_default=True;
+        # the merge logic must still skip .git (idempotent re: user intent).
+        recs, _ = ff.walk(self.tmp, excludes=[".git"])
+        paths = [r["path"] for r in recs]
+        self.assertFalse(any("/.git/" in p for p in paths))
+
+    def test_cli_flag_round_trip(self):
+        # default run: no .git/*; --no-ignore-vcs: .git/* present.
+        import io
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, ".git"))
+            with open(os.path.join(tmp, ".git", "HEAD"), "w") as f:
+                f.write("x")
+            with open(os.path.join(tmp, "real.txt"), "w") as f:
+                f.write("hi")
+            # default
+            buf = io.StringIO()
+            with mock.patch("sys.argv", ["ff", tmp]), mock.patch("sys.stdout", buf):
+                self.assertEqual(ff.main(), ff.EXIT_OK)
+            default_parsed = json.loads(buf.getvalue())
+            self.assertFalse(any("/.git/" in r["path"] for r in default_parsed["files"]),
+                             "default CLI walk leaked .git/*")
+            # --no-ignore-vcs
+            buf2 = io.StringIO()
+            with mock.patch("sys.argv", ["ff", "--no-ignore-vcs", tmp]), mock.patch("sys.stdout", buf2):
+                self.assertEqual(ff.main(), ff.EXIT_OK)
+            forced = json.loads(buf2.getvalue())
+            self.assertTrue(any("/.git/" in r["path"] for r in forced["files"]),
+                            "--no-ignore-vcs CLI flag did not surface .git/*")
+
+class TestDefaultHashBytes(unittest.TestCase):
+    """OBJ-006: pin CLI default --hash-bytes = full-file SHA for small files."""
+
+    def test_cli_default_hash_bytes_full_file_sha(self):
+        import io
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = b"hello world\n" * 10  # 120 bytes
+            with open(os.path.join(tmp, "hello.txt"), "wb") as f:
+                f.write(payload)
+            buf = io.StringIO()
+            with mock.patch("sys.argv", ["ff", tmp]), mock.patch("sys.stdout", buf):
+                self.assertEqual(ff.main(), ff.EXIT_OK)
+            parsed = json.loads(buf.getvalue())
+            self.assertEqual(len(parsed["files"]), 1)
+            self.assertEqual(
+                parsed["files"][0]["sha256"],
+                hashlib.sha256(payload).hexdigest(),
+            )
+

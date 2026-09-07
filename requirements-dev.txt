@@ -1,0 +1,5 @@
+# Dev tooling pins for FileFoundation.
+# Runtime stays pure stdlib (Python 3.9+) - this file is dev-only.
+ruff==0.16.6
+mypy==1.7.1
+pytest==8.3.3

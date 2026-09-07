@@ -22,12 +22,44 @@ from typing import Any
 
 __version__ = "0.1.0"
 
+__all__ = (
+    "DEFAULT_ENTROPY_THRESHOLD",
+    "EXIT_ARGS",
+    "EXIT_IO",
+    "EXIT_OK",
+    "HASH_CHUNK",
+    "_DEFAULT_IGNORE_GLOBS",
+    "__version__",
+    "aggregate",
+    "analyze_file",
+    "emit_json",
+    "emit_table",
+    "main",
+    "parse_args",
+    "walk",
+)
+
 EXIT_OK = 0
 EXIT_IO = 1
 EXIT_ARGS = 2
 
 HASH_CHUNK = 65536
 DEFAULT_ENTROPY_THRESHOLD = 7.5  # bits/byte; near-random
+
+# Default ignores: VCS / build / cache noise. Skipped unless the caller
+# passes ignore_vcs_default=False (CLI: --no-ignore-vcs).
+_DEFAULT_IGNORE_GLOBS = (
+    ".git",
+    "__pycache__",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".mypy_cache",
+    ".venv",
+    "node_modules",
+    ".tox",
+    "*.pyc",
+    ".DS_Store",
+)
 
 
 def _shannon_entropy(data: bytes) -> float:
@@ -79,10 +111,22 @@ def walk(
     excludes: Iterable[str] = (),
     follow_symlinks: bool = False,
     hash_bytes: int = HASH_CHUNK,
+    ignore_vcs_default: bool = True,
 ) -> tuple[list[dict[str, Any]], list[str]]:
+    """Walk `root` and return (records, warnings).
+
+    When `ignore_vcs_default` is True (the default), the standard VCS /
+    build / cache noise (`_DEFAULT_IGNORE_GLOBS`) is union-merged into
+    `excludes` for both directory-pruning and per-file filtering. Pass
+    `ignore_vcs_default=False` (CLI: --no-ignore-vcs) to disable.
+    """
     records = []
     warnings = []
-    excl = list(excludes)
+    user_excludes = list(excludes)
+    if ignore_vcs_default:
+        excl = list(_DEFAULT_IGNORE_GLOBS) + user_excludes
+    else:
+        excl = user_excludes
 
     def is_excluded(p: str) -> bool:
         base = os.path.basename(p)
@@ -176,6 +220,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    metavar="F", help=f"flag files with entropy >= F (default {DEFAULT_ENTROPY_THRESHOLD})")
     p.add_argument("--hash-bytes", type=int, default=HASH_CHUNK,
                    metavar="N", help=f"cap SHA-256 stream to N bytes (default {HASH_CHUNK})")
+    p.add_argument("--no-ignore-vcs", action="store_false",
+                   dest="ignore_vcs_default",
+                   help="do not skip .git / cache / build dirs by default")
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return p.parse_args(argv)
 
@@ -192,7 +239,12 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_ARGS
 
     try:
-        records, warnings = walk(root, excludes=args.exclude, hash_bytes=args.hash_bytes)
+        records, warnings = walk(
+            root,
+            excludes=args.exclude,
+            hash_bytes=args.hash_bytes,
+            ignore_vcs_default=args.ignore_vcs_default,
+        )
         summary = aggregate(records, high_entropy_threshold=args.high_entropy_threshold)
     except OSError as e:
         print(f"io error: {e}", file=sys.stderr)

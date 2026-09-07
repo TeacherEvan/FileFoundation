@@ -78,3 +78,28 @@ python -m unittest tests.test_filefoundation -v
 ## License
 
 See `LICENSE`.
+
+```bash
+# Skip VCS / cache / build dirs (default behavior)
+python filefoundation.py .
+
+# Force the walk to include .git/* (rarely useful)
+python filefoundation.py . --no-ignore-vcs
+
+# Cap the SHA-256 stream to the first 1 KiB (fast on huge files)
+python filefoundation.py . --hash-bytes 1024
+
+# Combine: cap hash + tighten the entropy threshold
+python filefoundation.py . --hash-bytes 4096 --high-entropy-threshold 6.5
+```
+
+## Default ignores
+
+When you do not pass `--no-ignore-vcs`, FileFoundation prunes these
+directories and patterns before recursing:
+
+`.git`, `__pycache__`, `.pytest_cache`, `.ruff_cache`, `.mypy_cache`,
+`.venv`, `node_modules`, `.tox`, `*.pyc`, `.DS_Store`
+
+Pass `--exclude` to add more patterns on top of the defaults.
+
