@@ -33,6 +33,7 @@ __all__ = (
     "aggregate",
     "analyze_file",
     "emit_json",
+    "emit_jsonl",
     "emit_table",
     "main",
     "parse_args",
@@ -112,6 +113,7 @@ def walk(
     follow_symlinks: bool = False,
     hash_bytes: int = HASH_CHUNK,
     ignore_vcs_default: bool = True,
+    min_size: int = 0,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Walk `root` and return (records, warnings).
 
@@ -119,6 +121,8 @@ def walk(
     build / cache noise (`_DEFAULT_IGNORE_GLOBS`) is union-merged into
     `excludes` for both directory-pruning and per-file filtering. Pass
     `ignore_vcs_default=False` (CLI: --no-ignore-vcs) to disable.
+
+    Files smaller than `min_size` bytes are skipped before analysis.
     """
     records = []
     warnings = []
@@ -138,6 +142,12 @@ def walk(
             full = os.path.join(parent, name)
             if is_excluded(full):
                 continue
+            if min_size > 0:
+                try:
+                    if os.path.getsize(full) < min_size:
+                        continue
+                except OSError:
+                    continue
             try:
                 records.append(analyze_file(full, hash_bytes=hash_bytes))
             except PermissionError as e:
@@ -173,6 +183,20 @@ def emit_json(
 ) -> str:
     return json.dumps({"summary": summary, "warnings": warnings, "files": records}, indent=2, sort_keys=False)
 
+
+def emit_jsonl(
+    records: list[dict[str, Any]],
+    summary: dict[str, Any],
+    warnings: list[str],
+) -> str:
+    """Emit one compact JSON object per line: file records, then summary, then warnings."""
+    out = []
+    for r in records:
+        out.append(json.dumps(r, sort_keys=True))
+    out.append(json.dumps({"summary": summary}, sort_keys=True))
+    for w in warnings:
+        out.append(json.dumps({"warning": w}, sort_keys=True))
+    return "\n".join(out)
 
 def emit_table(
     records: list[dict[str, Any]],
@@ -213,7 +237,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="filefoundation",
                                 description="Walk a directory tree and report per-file forensic properties.")
     p.add_argument("path", nargs="?", default=".", help="root directory (default: cwd)")
-    p.add_argument("--table", action="store_true", help="human-readable table instead of JSON")
+    out_group = p.add_mutually_exclusive_group()
+    out_group.add_argument("--table", action="store_true", help="human-readable table instead of JSON")
+    out_group.add_argument("--jsonl", action="store_true", help="JSON Lines output (one object per line)")
+    p.add_argument("--min-size", type=int, default=0, metavar="N",
+                   help="skip files smaller than N bytes (default 0)")
     p.add_argument("--exclude", "-x", action="append", default=[], metavar="GLOB",
                    help="glob pattern to exclude (repeatable; matches basename or full path)")
     p.add_argument("--high-entropy-threshold", type=float, default=DEFAULT_ENTROPY_THRESHOLD,
@@ -244,13 +272,16 @@ def main(argv: list[str] | None = None) -> int:
             excludes=args.exclude,
             hash_bytes=args.hash_bytes,
             ignore_vcs_default=args.ignore_vcs_default,
+            min_size=args.min_size,
         )
         summary = aggregate(records, high_entropy_threshold=args.high_entropy_threshold)
     except OSError as e:
         print(f"io error: {e}", file=sys.stderr)
         return EXIT_IO
 
-    if args.table:
+    if args.jsonl:
+        print(emit_jsonl(records, summary, warnings))
+    elif args.table:
         print(emit_table(records, summary, warnings))
     else:
         print(emit_json(records, summary, warnings))

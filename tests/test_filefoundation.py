@@ -194,6 +194,123 @@ class TestHashBytesCap(unittest.TestCase):
             )
 
 
+class TestEmitJsonl(unittest.TestCase):
+    """OBJ-003: emit_jsonl produces one compact JSON line per record + summary + warnings."""
+
+    def _rec(self, path="/a", size=1, sha="x", mime="text/plain", entropy=0.0):
+        return {"path": path, "size": size, "sha256": sha, "mime": mime,
+                "entropy": entropy, "mtime": "t", "ctime": "t", "atime": "t", "mode": "-"}
+
+    def test_jsonl_one_line_per_record(self):
+        recs = [self._rec("/a"), self._rec("/b", size=2)]
+        s = {"file_count": 2, "total_bytes": 3, "type_histogram": {"text/plain": 2},
+             "top_largest": [{"path": "/b", "size": 2}],
+             "high_entropy_files": [], "high_entropy_threshold": 7.5}
+        out = ff.emit_jsonl(recs, s, [])
+        lines = out.split("\n")
+        # 2 records + 1 summary = 3 lines, no warnings
+        self.assertEqual(len(lines), 3)
+        for line in lines[:-1]:
+            obj = json.loads(line)
+            self.assertIn("path", obj)
+        # last line is the summary wrapper
+        self.assertIn("summary", json.loads(lines[-1]))
+
+    def test_jsonl_includes_warnings(self):
+        recs = [self._rec("/a")]
+        s = {"file_count": 1, "total_bytes": 1, "type_histogram": {"text/plain": 1},
+             "top_largest": [{"path": "/a", "size": 1}],
+             "high_entropy_files": [], "high_entropy_threshold": 7.5}
+        out = ff.emit_jsonl(recs, s, ["permission denied: /x"])
+        lines = out.split("\n")
+        self.assertTrue(any("warning" in json.loads(ln) for ln in lines))
+
+    def test_jsonl_empty(self):
+        s = {"file_count": 0, "total_bytes": 0, "type_histogram": {},
+             "top_largest": [], "high_entropy_files": [], "high_entropy_threshold": 7.5}
+        out = ff.emit_jsonl([], s, [])
+        self.assertEqual(out, json.dumps({"summary": s}, sort_keys=True))
+
+
+class TestMinSize(unittest.TestCase):
+    """OBJ-005: --min-size filters files below the byte threshold in walk()."""
+
+    def test_min_size_skips_small_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "tiny.txt"), "w") as f:
+                f.write("x")  # 1 byte
+            with open(os.path.join(tmp, "big.txt"), "w") as f:
+                f.write("y" * 100)  # 100 bytes
+            recs, _ = ff.walk(tmp, min_size=10)
+            names = sorted(os.path.basename(r["path"]) for r in recs)
+            self.assertEqual(names, ["big.txt"])
+
+    def test_min_size_zero_is_noop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "a.txt"), "w") as f:
+                f.write("x")
+            recs, _ = ff.walk(tmp, min_size=0)
+            self.assertEqual(len(recs), 1)
+
+    def test_walk_propagates_min_size_kwarg(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "small.bin"), "wb") as f:
+                f.write(b"A" * 5)
+            with open(os.path.join(tmp, "large.bin"), "wb") as f:
+                f.write(b"B" * 50)
+            recs, _ = ff.walk(tmp, min_size=20)
+            self.assertEqual(len(recs), 1)
+            self.assertTrue(recs[0]["path"].endswith("large.bin"))
+
+
+class TestJSONLCLI(unittest.TestCase):
+    """OBJ-004: --jsonl CLI flag produces JSON Lines output."""
+
+    def test_jsonl_flag_emits_lines(self):
+        import io
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "x.txt"), "w") as f:
+                f.write("hi")
+            buf = io.StringIO()
+            with mock.patch("sys.argv", ["ff", "--jsonl", tmp]), mock.patch("sys.stdout", buf):
+                rc = ff.main()
+            self.assertEqual(rc, ff.EXIT_OK)
+            out = buf.getvalue().strip().split("\n")
+            # at least the summary line
+            self.assertTrue(any("summary" in json.loads(ln) for ln in out))
+
+    def test_jsonl_and_table_mutually_exclusive(self):
+        import io
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "x.txt"), "w") as f:
+                f.write("hi")
+            buf = io.StringIO()
+            with mock.patch("sys.argv", ["ff", "--jsonl", "--table", tmp]), \
+                 mock.patch("sys.stderr", buf):
+                rc = ff.main()
+            # argparse mutually exclusive group -> SystemExit(2) -> main returns EXIT_ARGS
+            self.assertEqual(rc, ff.EXIT_ARGS)
+
+
+class TestMinSizeCLI(unittest.TestCase):
+    """OBJ-005: --min-size CLI flag filters output."""
+
+    def test_min_size_flag_filters(self):
+        import io
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "tiny.txt"), "w") as f:
+                f.write("x")
+            with open(os.path.join(tmp, "big.txt"), "w") as f:
+                f.write("y" * 100)
+            buf = io.StringIO()
+            with mock.patch("sys.argv", ["ff", "--min-size", "10", tmp]), mock.patch("sys.stdout", buf):
+                rc = ff.main()
+            self.assertEqual(rc, ff.EXIT_OK)
+            parsed = json.loads(buf.getvalue())
+            self.assertEqual(len(parsed["files"]), 1)
+            self.assertTrue(parsed["files"][0]["path"].endswith("big.txt"))
+
+
 if __name__ == "__main__":
     unittest.main()
 
